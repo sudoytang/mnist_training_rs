@@ -24,8 +24,9 @@ pub fn cross_entropy_loss(prob: &[f64], label: &[f64]) -> f64 {
 pub struct FNNLayer {
     pub n_in: usize,
     pub n_out: usize,
-    pub weights: Array2<f64>,  // (n_in, n_out) — C-contiguous, matches Python layout
-    pub biases: Array1<f64>,   // (n_out,)
+    pub weights: Array2<f64>,    // (n_in, n_out) C-contiguous
+    pub weights_t: Array2<f64>,  // (n_out, n_in) C-contiguous, kept in sync with weights
+    pub biases: Array1<f64>,     // (n_out,)
 }
 
 impl FNNLayer {
@@ -36,11 +37,15 @@ impl FNNLayer {
             .take(n_in * n_out)
             .collect();
         let weights = Array2::from_shape_vec((n_in, n_out), weights)?;
+        // zeros() allocates C-contiguous; assign() copies data without changing layout
+        let mut weights_t = Array2::<f64>::zeros((n_out, n_in));
+        weights_t.assign(&weights.t());
 
         Ok(Self {
             n_in,
             n_out,
             weights,
+            weights_t,
             biases: Array1::zeros(n_out),
         })
     }
@@ -133,14 +138,18 @@ impl FNN {
             let a_prev: &Array2<f64> = if l == 0 { input } else { &caches[l - 1].a };
 
             // dW = a_prev^T @ delta / batch  (n_in × n_out)
-            let dw = a_prev.t().dot(&delta) * scale;
+            // zeros() → C-contiguous, assign() copies without changing layout → C × C → BLAS
+            let mut a_prev_t = Array2::<f64>::zeros((a_prev.ncols(), a_prev.nrows()));
+            a_prev_t.assign(&a_prev.t());
+            let dw = a_prev_t.dot(&delta) * scale;
 
             // db = mean(delta, axis=0)  (n_out,)
             let db = delta.mean_axis(Axis(0)).unwrap();
 
             if l > 0 {
-                // delta_prev = (delta @ W^T) * relu_deriv(z_prev)  (batch × n_in)
-                let new_delta = delta.dot(&layer.weights.t()) * caches[l - 1].z.mapv(relu_deriv);
+                // delta_prev = delta @ weights_t * relu_deriv(z_prev)  (batch × n_in)
+                // weights_t is C-contiguous → C × C → BLAS
+                let new_delta = delta.dot(&layer.weights_t) * caches[l - 1].z.mapv(relu_deriv);
                 delta = new_delta;
             }
 
@@ -153,6 +162,7 @@ impl FNN {
     pub fn update(&mut self, grads: &[LayerGrad], lr: f64) {
         for (layer, grad) in self.layers.iter_mut().zip(grads.iter()) {
             layer.weights.scaled_add(-lr, &grad.dw);
+            layer.weights_t.assign(&layer.weights.t());  // sync C-contiguous transpose
             layer.biases.scaled_add(-lr, &grad.db);
         }
     }
