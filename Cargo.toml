@@ -3,6 +3,9 @@ name = "mnist_training_rs"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+debug = true
+
 [dependencies]
 anyhow = "1.0.102"
 mnist = "0.6"

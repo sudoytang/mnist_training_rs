@@ -148,6 +148,41 @@ impl Matrix {
         result
     }
 
+    /// Computes A @ B^T: (m×k) @ (n×k)^T = (m×n)
+    /// Used in forward pass: input_batch @ W^T
+    pub fn mul_abt(a: &Matrix, b: &Matrix) -> Matrix {
+        assert_eq!(a.cols, b.cols);
+        let (m, k, n) = (a.rows, a.cols, b.rows);
+        let mut result = Matrix::new(m, n);
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = 0.0_f64;
+                for kk in 0..k {
+                    sum += a.data[i * k + kk] * b.data[j * k + kk];
+                }
+                result.data[i * n + j] = sum;
+            }
+        }
+        result
+    }
+
+    /// Computes A^T @ B: (n×m)^T @ (n×k) = (m×k)
+    /// Used in backward pass: delta^T @ a_prev → dW
+    pub fn mul_atb(a: &Matrix, b: &Matrix) -> Matrix {
+        assert_eq!(a.rows, b.rows);
+        let (n_rows, m, k) = (a.rows, a.cols, b.cols);
+        let mut result = Matrix::new(m, k);
+        for nn in 0..n_rows {
+            for i in 0..m {
+                let a_val = a.data[nn * m + i];
+                for j in 0..k {
+                    result.data[i * k + j] += a_val * b.data[nn * k + j];
+                }
+            }
+        }
+        result
+    }
+
     pub fn add(&self, other: &Matrix) -> Matrix {
         assert_eq!(self.rows, other.rows);
         assert_eq!(self.cols, other.cols);
@@ -219,6 +254,11 @@ pub struct FNN {
 pub struct LayerCache {
     pub z: Vec<f64>,    // shape: (n_out)
     pub a: Vec<f64>,    // shape: (n_out)
+}
+
+pub struct BatchLayerCache {
+    pub z: Matrix,  // shape: (batch, n_out)
+    pub a: Matrix,  // shape: (batch, n_out)
 }
 
 pub struct LayerGrad {
@@ -313,6 +353,98 @@ impl FNN {
                     .map(|(da, z)| da * relu_deriv(*z))
                     .collect();
             }
+        }
+        layer_grads
+    }
+
+    /// Forward pass for a whole batch.
+    /// input: Matrix (batch × n_in), returns one BatchLayerCache per layer.
+    pub fn forward_batch(&self, input: &Matrix) -> Vec<BatchLayerCache> {
+        assert_eq!(self.layers[0].n_in, input.cols);
+        let batch = input.rows;
+        let mut caches: Vec<BatchLayerCache> = Vec::new();
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            let prev_a: &Matrix = if i == 0 { input } else { &caches[i - 1].a };
+
+            // z = prev_a @ W^T + b  →  (batch × n_out)
+            let mut z = Matrix::mul_abt(prev_a, &layer.weights);
+            for r in 0..batch {
+                for c in 0..layer.n_out {
+                    z.data[r * layer.n_out + c] += layer.biases.data[c];
+                }
+            }
+
+            let a = if i < self.layers.len() - 1 {
+                let data: Vec<f64> = z.data.iter().copied().map(relu).collect();
+                Matrix::from_data(batch, layer.n_out, data)
+            } else {
+                let mut a_data = vec![0.0; batch * layer.n_out];
+                for r in 0..batch {
+                    let s = r * layer.n_out;
+                    let probs = softmax(&z.data[s..s + layer.n_out]);
+                    a_data[s..s + layer.n_out].copy_from_slice(&probs);
+                }
+                Matrix::from_data(batch, layer.n_out, a_data)
+            };
+
+            caches.push(BatchLayerCache { z, a });
+        }
+        caches
+    }
+
+    /// Backward pass for a whole batch. Returns already-averaged gradients.
+    /// input: (batch × n_in), labels: (batch × n_out) one-hot
+    pub fn backward_batch(
+        &self,
+        input: &Matrix,
+        caches: &[BatchLayerCache],
+        labels: &Matrix,
+    ) -> Vec<LayerGrad> {
+        let batch = input.rows;
+        let n = self.layers.len();
+        let scale = 1.0 / batch as f64;
+
+        // initial delta: p - y  (batch × n_classes)
+        let last_a = &caches.last().unwrap().a;
+        let delta_data: Vec<f64> = last_a.data.iter().zip(labels.data.iter())
+            .map(|(p, y)| p - y)
+            .collect();
+        let mut delta = Matrix::from_data(batch, self.layers.last().unwrap().n_out, delta_data);
+
+        let mut layer_grads: Vec<LayerGrad> = self.layers.iter()
+            .map(|l| LayerGrad::zero(l.n_out, l.n_in))
+            .collect();
+
+        for l in (0..n).rev() {
+            let layer = &self.layers[l];
+            let a_prev: &Matrix = if l == 0 { input } else { &caches[l - 1].a };
+
+            // dW = delta^T @ a_prev / batch  (n_out × n_in)
+            let mut dw = Matrix::mul_atb(&delta, a_prev);
+            for v in dw.data.iter_mut() { *v *= scale; }
+
+            // db = mean(delta, axis=0)  (n_out,)
+            let mut db = vec![0.0; layer.n_out];
+            for r in 0..batch {
+                for c in 0..layer.n_out {
+                    db[c] += delta.data[r * layer.n_out + c];
+                }
+            }
+            for v in db.iter_mut() { *v *= scale; }
+
+            if l > 0 {
+                // delta_prev = (delta @ W) * relu_deriv(z_prev)
+                let delta_prev_raw = delta.mul_matmat(&layer.weights);
+                let z_prev = &caches[l - 1].z;
+                let data: Vec<f64> = delta_prev_raw.data.iter()
+                    .zip(z_prev.data.iter())
+                    .map(|(da, z)| da * relu_deriv(*z))
+                    .collect();
+                delta = Matrix::from_data(batch, self.layers[l - 1].n_out, data);
+            }
+
+            layer_grads[l] = LayerGrad { dw, db };
         }
         layer_grads
     }

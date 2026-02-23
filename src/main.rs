@@ -1,28 +1,18 @@
 pub mod model;
 
 use mnist::{Mnist, MnistBuilder};
-use model::{cross_entropy_loss, LayerGrad, FNN};
+use model::{cross_entropy_loss, FNN, Matrix};
 use rand::seq::SliceRandom;
 use std::time::Instant;
 
 const BATCH_SIZE: usize = 64;
 const LOG_EVERY_BATCHES: usize = 67;
 
-const EPOCHS: usize = 2;
+const EPOCHS: usize = 10;
 const LEARNING_RATE: f64 = 0.1;
 const N_TRAIN: usize = 60_000;
 const N_TEST: usize = 10_000;
 const IMG_SIZE: usize = 28 * 28;
-
-fn pixel_to_input(raw: &[u8]) -> Vec<f64> {
-    raw.iter().map(|&p| p as f64 / 255.0).collect()
-}
-
-fn label_to_onehot(label: u8) -> Vec<f64> {
-    let mut v = vec![0.0; 10];
-    v[label as usize] = 1.0;
-    v
-}
 
 fn argmax(v: &[f64]) -> usize {
     v.iter()
@@ -60,36 +50,35 @@ fn main() {
         for (batch_idx, batch_start) in (0..N_TRAIN).step_by(BATCH_SIZE).enumerate() {
             let batch_end = (batch_start + BATCH_SIZE).min(N_TRAIN);
             let batch_len = batch_end - batch_start;
+            let batch_indices = &indices[batch_start..batch_end];
 
-            let mut acc_grads: Vec<LayerGrad> = fnn.layers.iter()
-                .map(|l| LayerGrad::zero(l.n_out, l.n_in))
-                .collect();
+            // build input matrix (batch × 784) and label matrix (batch × 10)
+            let mut input_data = Vec::with_capacity(batch_len * IMG_SIZE);
+            let mut label_data = Vec::with_capacity(batch_len * 10);
+            for &i in batch_indices {
+                input_data.extend(trn_img[i * IMG_SIZE..(i + 1) * IMG_SIZE].iter().map(|&p| p as f64 / 255.0));
+                let lbl = trn_lbl[i] as usize;
+                for c in 0..10usize { label_data.push(if c == lbl { 1.0 } else { 0.0 }); }
+            }
+            let input_matrix = Matrix::from_data(batch_len, IMG_SIZE, input_data);
+            let label_matrix = Matrix::from_data(batch_len, 10, label_data);
 
-            for &i in &indices[batch_start..batch_end] {
-                let input = pixel_to_input(&trn_img[i * IMG_SIZE..(i + 1) * IMG_SIZE]);
-                let label = label_to_onehot(trn_lbl[i]);
+            let caches = fnn.forward_batch(&input_matrix);
+            let probs_matrix = &caches.last().unwrap().a;
 
-                let caches = fnn.forward(&input);
-                let probs = &caches.last().unwrap().a;
-
-                let loss = cross_entropy_loss(probs, &label);
-                let hit = argmax(probs) == trn_lbl[i] as usize;
-
+            for (r, &orig_idx) in batch_indices.iter().enumerate() {
+                let probs = probs_matrix.row(r);
+                let label_row = label_matrix.row(r);
+                let loss = cross_entropy_loss(probs, label_row);
+                let hit = argmax(probs) == trn_lbl[orig_idx] as usize;
                 total_loss += loss;
                 window_loss += loss;
                 if hit { correct += 1; window_correct += 1; }
                 window_samples += 1;
-
-                let grads = fnn.backward(&input, caches, &label);
-                for (acc, g) in acc_grads.iter_mut().zip(grads.iter()) {
-                    acc.accumulate(g);
-                }
             }
 
-            for g in acc_grads.iter_mut() {
-                g.scale(1.0 / batch_len as f64);
-            }
-            fnn.update(&acc_grads, LEARNING_RATE);
+            let grads = fnn.backward_batch(&input_matrix, &caches, &label_matrix);
+            fnn.update(&grads, LEARNING_RATE);
 
             if (batch_idx + 1) % LOG_EVERY_BATCHES == 0 {
                 let elapsed = t.elapsed().as_secs_f64();
@@ -113,15 +102,20 @@ fn main() {
     }
 
     let mut correct = 0usize;
-    for i in 0..N_TEST {
-        let input = pixel_to_input(&tst_img[i * IMG_SIZE..(i + 1) * IMG_SIZE]);
-        let label_idx = tst_lbl[i] as usize;
-
-        let caches = fnn.forward(&input);
-        let probs = &caches.last().unwrap().a;
-
-        if argmax(probs) == label_idx {
-            correct += 1;
+    for test_start in (0..N_TEST).step_by(BATCH_SIZE) {
+        let test_end = (test_start + BATCH_SIZE).min(N_TEST);
+        let test_len = test_end - test_start;
+        let mut input_data = Vec::with_capacity(test_len * IMG_SIZE);
+        for i in test_start..test_end {
+            input_data.extend(tst_img[i * IMG_SIZE..(i + 1) * IMG_SIZE].iter().map(|&p| p as f64 / 255.0));
+        }
+        let input_matrix = Matrix::from_data(test_len, IMG_SIZE, input_data);
+        let caches = fnn.forward_batch(&input_matrix);
+        let probs_matrix = &caches.last().unwrap().a;
+        for (r, i) in (test_start..test_end).enumerate() {
+            if argmax(probs_matrix.row(r)) == tst_lbl[i] as usize {
+                correct += 1;
+            }
         }
     }
 
