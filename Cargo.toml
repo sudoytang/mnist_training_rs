@@ -11,3 +11,5 @@ anyhow = "1.0.102"
 mnist = "0.6"
 rand = "0.10.0"
 rand_distr = "0.6.0"
+ndarray = { version = "0.15", features = ["blas"] }
+blas-src = { version = "0.8", features = ["accelerate"] }

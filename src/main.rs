@@ -1,14 +1,15 @@
 pub mod model;
 
 use mnist::{Mnist, MnistBuilder};
-use model::{cross_entropy_loss, FNN, Matrix};
+use model::{cross_entropy_loss, FNN};
+use ndarray::Array2;
 use rand::seq::SliceRandom;
 use std::time::Instant;
 
 const BATCH_SIZE: usize = 64;
 const LOG_EVERY_BATCHES: usize = 67;
 
-const EPOCHS: usize = 10;
+const EPOCHS: usize = 20;
 const LEARNING_RATE: f64 = 0.1;
 const N_TRAIN: usize = 60_000;
 const N_TEST: usize = 10_000;
@@ -52,7 +53,6 @@ fn main() {
             let batch_len = batch_end - batch_start;
             let batch_indices = &indices[batch_start..batch_end];
 
-            // build input matrix (batch × 784) and label matrix (batch × 10)
             let mut input_data = Vec::with_capacity(batch_len * IMG_SIZE);
             let mut label_data = Vec::with_capacity(batch_len * 10);
             for &i in batch_indices {
@@ -60,8 +60,8 @@ fn main() {
                 let lbl = trn_lbl[i] as usize;
                 for c in 0..10usize { label_data.push(if c == lbl { 1.0 } else { 0.0 }); }
             }
-            let input_matrix = Matrix::from_data(batch_len, IMG_SIZE, input_data);
-            let label_matrix = Matrix::from_data(batch_len, 10, label_data);
+            let input_matrix = Array2::from_shape_vec((batch_len, IMG_SIZE), input_data).unwrap();
+            let label_matrix = Array2::from_shape_vec((batch_len, 10), label_data).unwrap();
 
             let caches = fnn.forward_batch(&input_matrix);
             let probs_matrix = &caches.last().unwrap().a;
@@ -69,8 +69,8 @@ fn main() {
             for (r, &orig_idx) in batch_indices.iter().enumerate() {
                 let probs = probs_matrix.row(r);
                 let label_row = label_matrix.row(r);
-                let loss = cross_entropy_loss(probs, label_row);
-                let hit = argmax(probs) == trn_lbl[orig_idx] as usize;
+                let loss = cross_entropy_loss(probs.as_slice().unwrap(), label_row.as_slice().unwrap());
+                let hit = argmax(probs.as_slice().unwrap()) == trn_lbl[orig_idx] as usize;
                 total_loss += loss;
                 window_loss += loss;
                 if hit { correct += 1; window_correct += 1; }
@@ -86,7 +86,7 @@ fn main() {
                 let acc = window_correct as f64 / window_samples as f64 * 100.0;
                 let ms_per_batch = elapsed / LOG_EVERY_BATCHES.min(batch_idx + 1) as f64 * 1000.0;
                 println!(
-                    "epoch {epoch:2} [{:4}/{n_batches}] | loss: {avg:.4} | acc: {acc:.1}% | {ms_per_batch:.1}ms/batch",
+                    "epoch {epoch:2} [{:4}/{n_batches}] | loss: {avg:.4} | acc: {acc:.1}% | {ms_per_batch:.3}ms/batch",
                     batch_idx + 1,
                 );
                 window_loss = 0.0;
@@ -109,11 +109,11 @@ fn main() {
         for i in test_start..test_end {
             input_data.extend(tst_img[i * IMG_SIZE..(i + 1) * IMG_SIZE].iter().map(|&p| p as f64 / 255.0));
         }
-        let input_matrix = Matrix::from_data(test_len, IMG_SIZE, input_data);
+        let input_matrix = Array2::from_shape_vec((test_len, IMG_SIZE), input_data).unwrap();
         let caches = fnn.forward_batch(&input_matrix);
         let probs_matrix = &caches.last().unwrap().a;
         for (r, i) in (test_start..test_end).enumerate() {
-            if argmax(probs_matrix.row(r)) == tst_lbl[i] as usize {
+            if argmax(probs_matrix.row(r).as_slice().unwrap()) == tst_lbl[i] as usize {
                 correct += 1;
             }
         }
