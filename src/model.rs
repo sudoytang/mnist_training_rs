@@ -24,7 +24,7 @@ pub fn cross_entropy_loss(prob: &[f64], label: &[f64]) -> f64 {
 pub struct FNNLayer {
     pub n_in: usize,
     pub n_out: usize,
-    pub weights: Array2<f64>,  // (n_out, n_in)
+    pub weights: Array2<f64>,  // (n_in, n_out) — C-contiguous, matches Python layout
     pub biases: Array1<f64>,   // (n_out,)
 }
 
@@ -33,9 +33,9 @@ impl FNNLayer {
         // Kaiming He initialization: W ~ N(0, sqrt(2/n_in))
         let norm_distr = Normal::new(0., (2.0_f64 / n_in as f64).sqrt())?;
         let weights = norm_distr.sample_iter(rand::rng())
-            .take(n_out * n_in)
+            .take(n_in * n_out)
             .collect();
-        let weights = Array2::from_shape_vec((n_out, n_in), weights)?;
+        let weights = Array2::from_shape_vec((n_in, n_out), weights)?;
 
         Ok(Self {
             n_in,
@@ -57,7 +57,7 @@ pub struct BatchLayerCache {
 }
 
 pub struct LayerGrad {
-    pub dw: Array2<f64>,  // (n_out, n_in)
+    pub dw: Array2<f64>,  // (n_in, n_out)
     pub db: Array1<f64>,  // (n_out,)
 }
 
@@ -86,9 +86,9 @@ impl FNN {
         for (i, layer) in self.layers.iter().enumerate() {
             let prev_a: &Array2<f64> = if i == 0 { input } else { &caches[i - 1].a };
 
-            // z = prev_a @ W^T + b  (batch × n_out)
-            // BLAS DGEMM via ndarray .dot()
-            let mut z = prev_a.dot(&layer.weights.t());
+            // z = prev_a @ W + b  (batch × n_out)
+            // both C-contiguous → BLAS DGEMM
+            let mut z = prev_a.dot(&layer.weights);
             z += &layer.biases;  // broadcast bias to every row
 
             let a = if i < self.layers.len() - 1 {
@@ -132,15 +132,15 @@ impl FNN {
             let layer = &self.layers[l];
             let a_prev: &Array2<f64> = if l == 0 { input } else { &caches[l - 1].a };
 
-            // dW = delta^T @ a_prev / batch  (n_out × n_in)
-            let dw = delta.t().dot(a_prev) * scale;
+            // dW = a_prev^T @ delta / batch  (n_in × n_out)
+            let dw = a_prev.t().dot(&delta) * scale;
 
             // db = mean(delta, axis=0)  (n_out,)
             let db = delta.mean_axis(Axis(0)).unwrap();
 
             if l > 0 {
-                // delta_prev = (delta @ W) * relu_deriv(z_prev)
-                let new_delta = delta.dot(&layer.weights) * caches[l - 1].z.mapv(relu_deriv);
+                // delta_prev = (delta @ W^T) * relu_deriv(z_prev)  (batch × n_in)
+                let new_delta = delta.dot(&layer.weights.t()) * caches[l - 1].z.mapv(relu_deriv);
                 delta = new_delta;
             }
 
