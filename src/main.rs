@@ -7,8 +7,6 @@ use rand::seq::SliceRandom;
 use std::time::Instant;
 
 const BATCH_SIZE: usize = 64;
-const LOG_EVERY_BATCHES: usize = 67;
-
 const EPOCHS: usize = 20;
 const LEARNING_RATE: f64 = 0.1;
 const N_TRAIN: usize = 60_000;
@@ -43,12 +41,9 @@ fn main() {
         indices.shuffle(&mut rng);
         let mut total_loss = 0.0;
         let mut correct = 0usize;
-        let mut window_loss = 0.0;
-        let mut window_correct = 0usize;
-        let mut window_samples = 0usize;
-        let mut t = Instant::now();
+        let t = Instant::now();
 
-        for (batch_idx, batch_start) in (0..N_TRAIN).step_by(BATCH_SIZE).enumerate() {
+        for batch_start in (0..N_TRAIN).step_by(BATCH_SIZE) {
             let batch_end = (batch_start + BATCH_SIZE).min(N_TRAIN);
             let batch_len = batch_end - batch_start;
             let batch_indices = &indices[batch_start..batch_end];
@@ -72,33 +67,18 @@ fn main() {
                 let loss = cross_entropy_loss(probs.as_slice().unwrap(), label_row.as_slice().unwrap());
                 let hit = argmax(probs.as_slice().unwrap()) == trn_lbl[orig_idx] as usize;
                 total_loss += loss;
-                window_loss += loss;
-                if hit { correct += 1; window_correct += 1; }
-                window_samples += 1;
+                if hit { correct += 1; }
             }
 
             let grads = fnn.backward_batch(&input_matrix, &caches, &label_matrix);
             fnn.update(&grads, LEARNING_RATE);
-
-            if (batch_idx + 1) % LOG_EVERY_BATCHES == 0 {
-                let elapsed = t.elapsed().as_secs_f64();
-                let avg = window_loss / window_samples as f64;
-                let acc = window_correct as f64 / window_samples as f64 * 100.0;
-                let ms_per_batch = elapsed / LOG_EVERY_BATCHES.min(batch_idx + 1) as f64 * 1000.0;
-                println!(
-                    "epoch {epoch:2} [{:4}/{n_batches}] | loss: {avg:.4} | acc: {acc:.1}% | {ms_per_batch:.3}ms/batch",
-                    batch_idx + 1,
-                );
-                window_loss = 0.0;
-                window_correct = 0;
-                window_samples = 0;
-                t = Instant::now();
-            }
         }
 
+        let elapsed = t.elapsed().as_micros();
+        let us_per_batch = elapsed as f64 / n_batches as f64;
         let avg_loss = total_loss / N_TRAIN as f64;
         let accuracy = correct as f64 / N_TRAIN as f64 * 100.0;
-        println!("epoch {epoch:2} done  | loss: {avg_loss:.4} | train acc: {accuracy:.2}%\n");
+        println!("epoch {epoch:2} done  | loss: {avg_loss:.4} | train acc: {accuracy:.2}% | {us_per_batch:.1}us/batch");
     }
 
     let mut correct = 0usize;
